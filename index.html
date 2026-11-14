@@ -1806,8 +1806,9 @@
       }
 
       window.fb.onSnapshot(colRef, (querySnap) => {
-        if (querySnap.metadata.hasPendingWrites) return;
-        updateSyncStatusBadge("☁️ Cloud Synced", true);
+  if (querySnap.metadata.hasPendingWrites) return;
+  _fbSyncError = null;
+  updateSyncStatusBadge("☁️ Cloud Synced", true);
         let anyChanged = false;
         const changedSecs = new Set();
         querySnap.docChanges().forEach((change) => {
@@ -3129,7 +3130,7 @@
                         <span class="badge ${chosen === undefined ? "badge-amber" : (isCorrect ? "badge-green" : "badge-red")}">
                           ${chosen === undefined ? "Skipped" : (isCorrect ? "Correct" : "Incorrect")}
                         </span>
-                        <button class="btn btn-soft btn-sm" onclick="askAiDirectPrompt('${escapeJsArg(explainPrompt)}')">🤖 Explain with AI</button>
+                        <button class="btn btn-soft btn-sm" onclick="askAiDirectPrompt('${escapeJsArg(explainPrompt)}','${escapeJsArg(q.question)}')">🤖 Explain with AI</button>
                       </div>
                     </div>
                     <div style="font-size:0.86rem;margin-bottom:6px;">
@@ -3913,7 +3914,11 @@
         e.preventDefault();
         const fd = new FormData(e.target), file = fd.get("subFile");
         let fileId = existing?.fileId || null, fileName = existing?.fileName || "Submission.txt";
-        if (file && file.size > 0) { const saved = await FileDB.saveFile(file); fileId = saved.id; fileName = saved.name; }
+        if (file && file.size > 0) {
+  const saved = await FileDB.saveFile(file);
+  if (existing?.fileId) await FileDB.deleteFile(existing.fileId);
+  fileId = saved.id; fileName = saved.name;
+}
         const payload = {
           id: existing ? existing.id : "sub_" + Date.now(), assignmentId: asgId, studentId: currentUser.id,
           studentName: currentUser.name, rollNo: currentUser.rollNo, fileId, fileName, note: fd.get("note").trim(),
@@ -5376,7 +5381,7 @@
             <div class="card">
               <h3 class="card-title" style="margin-bottom:14px;">Appearance &amp; Language</h3>
               <div class="form-stack">
-                <button class="btn btn-outline" onclick="applyTheme(appState.settings.theme==='dark'?'light':'dark')">Switch to ${appState.settings.theme === "dark" ? "Light ☀️" : "Dark 🌙"} Mode</button>
+                <button class="btn btn-outline" onclick="applyTheme(appState.settings.theme==='dark'?'light':'dark');renderSettingsPage(document.getElementById('page-container'))">Switch to ${appState.settings.theme === "dark" ? "Light ☀️" : "Dark 🌙"} Mode</button>
                 <button class="btn btn-outline" onclick="document.getElementById('lang-toggle-btn').click()">Toggle Language (Current: ${appState.settings.language.toUpperCase()})</button>
               </div>
             </div>

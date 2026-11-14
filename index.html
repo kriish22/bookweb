@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet" />
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <style>
     :root {
       --bg: #f1f5f9;
@@ -924,7 +925,7 @@
         users: [
           {
             id: "u_teacher1", role: "teacher", name: "Prof. Ananya Sharma",
-            email: "kriish2206@gmail.com", phone: "+91 9876543210", rollNo: "FAC101",
+            email: "teacher@eduvault.edu", phone: "+91 9876543210", rollNo: "FAC101",
             passwordHash: hashPassword("Teach@2026"),
             department: "Computer Science (CS)", course: "Faculty", semester: "All", active: true, photo: "",
             createdAt: "2026-09-01"
@@ -4012,16 +4013,16 @@
       openCrudModal("Upload External Study Material for AI", `
         <form id="ext-ai-upload-form" class="form-stack">
           <div class="form-grid-2">
-            <div class="form-group"><label>Material Title</label><input type="text" name="title" required placeholder="e.g. Operating Systems Chapter 4 Notes" /></div>
-            <div class="form-group"><label>Subject / Topic</label><input type="text" name="subject" required placeholder="e.g. Operating Systems" /></div>
+            <div class="form-group"><label>Material Title</label><input type="text" name="title" required placeholder="e.g. Excel Formulas / OS Chapter 4" /></div>
+            <div class="form-group"><label>Subject / Topic</label><input type="text" name="subject" required placeholder="e.g. MS Excel / Computer" /></div>
           </div>
           <div class="form-group">
-            <label>Upload File (.pdf, .txt, .md, .csv)</label>
-            <input type="file" id="ext-ai-file" name="extFile" accept=".pdf,.txt,.md,.csv" />
+            <label>Upload File (.pdf, .xlsx, .xls, .txt, .md, .csv)</label>
+            <input type="file" id="ext-ai-file" name="extFile" accept=".pdf,.xlsx,.xls,.txt,.md,.csv" />
           </div>
           <div class="form-group">
             <label>Or Paste Notes / Chapter / Question Text Directly</label>
-            <textarea name="pastedText" rows="6" placeholder="Paste your notes, article, or questions here (or upload a PDF above)..."></textarea>
+            <textarea name="pastedText" rows="6" placeholder="Paste your notes, article, or questions here (or upload a file above)..."></textarea>
           </div>
           <button type="submit" id="ext-ai-save-btn" class="btn btn-primary">Extract &amp; Load into AI Study Assistant</button>
         </form>
@@ -4034,6 +4035,7 @@
         const file = fd.get("extFile");
         let content = (fd.get("pastedText") || "").trim();
         let fileName = "";
+        let rawFileId = null;
 
         const btn = document.getElementById("ext-ai-save-btn");
         btn.disabled = true; btn.textContent = "Processing Material...";
@@ -4041,13 +4043,24 @@
         try {
           if (file && file.size > 0) {
             fileName = file.name;
-            if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+            const lower = file.name.toLowerCase();
+            if (file.type === "application/pdf" || lower.endsWith(".pdf")) {
+              const savedRaw = await FileDB.saveFile(file);
+              rawFileId = savedRaw.id;
               const buf = await file.arrayBuffer();
               const extracted = await extractFullPdfTextFromBuffer(buf);
               content = extracted ? `${extracted}\n\n${content}`.trim() : content;
               if (!extracted && !content) {
-                content = `Uploaded PDF "${file.name}" (Scanned/image PDF — ask questions or connect Google Gemini).`;
+                content = `[SCANNED_PDF:${file.name}] Text could not be extracted locally. Connect Google Gemini for full OCR/vision reading.`;
               }
+            } else if ((lower.endsWith(".xlsx") || lower.endsWith(".xls")) && window.XLSX) {
+              const buf = await file.arrayBuffer();
+              const wb = XLSX.read(buf, { type: "array" });
+              const sheetTexts = wb.SheetNames.map((name) => {
+                const csv = XLSX.utils.sheet_to_csv(wb.Sheets[name]);
+                return `[Excel Sheet: ${name}]\n${csv}`;
+              });
+              content = `${sheetTexts.join("\n\n")}\n\n${content}`.trim();
             } else {
               const textFromFile = await file.text();
               content = `${textFromFile}\n\n${content}`.trim();
@@ -4055,7 +4068,7 @@
           }
           if (!content) {
             btn.disabled = false; btn.textContent = "Extract & Load into AI Study Assistant";
-            return showToast("Please upload a PDF/Text file or paste study text.", "error");
+            return showToast("Please upload a PDF/Excel/Text file or paste study text.", "error");
           }
 
           const savedTxt = await FileDB.saveText(content, `${title}.txt`);
@@ -4065,6 +4078,7 @@
             title,
             subject,
             fileName,
+            rawFileId,
             textFileId: savedTxt.id,
             charCount: content.length,
             createdAt: new Date().toISOString().slice(0, 10)
@@ -4077,7 +4091,7 @@
           showToast(`"${title}" loaded into AI Study Assistant!`, "success");
           aiChatHistory.push({
             sender: "bot",
-            text: `📤 External Material Loaded: "${title}" (${content.length} characters extracted).\n\nClick "🧠 Build Complete AI Study Model", "📄 Generate Detailed Summary", or ask any question below!`,
+            text: `📤 Material Loaded: "${title}" (${content.length} chars).\n\nAb aap neeche "🎯 Important Exam Questions", "📄 Detailed Summary", "✅ Interactive Practice Test" daba sakte hain ya kuch bhi pooch sakte hain!`,
             searchQuery: `${title} ${subject}`
           });
           renderAiAssistantPage(document.getElementById("page-container"));

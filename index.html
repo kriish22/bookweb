@@ -204,11 +204,12 @@
 
     .main-wrapper { flex: 1; margin-left: var(--sidebar-w); display: flex; flex-direction: column; min-width: 0; }
     .topbar {
-      height: 66px; background: var(--surface); border-bottom: 1px solid var(--border);
-      padding: 0 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; position: sticky; top: 0; z-index: 30;
+      min-height: 66px; background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 8px 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; position: sticky; top: 0; z-index: 30;
     }
-    .topbar-left { display: flex; align-items: center; gap: 12px; flex: 1; max-width: 620px; }
-    .topbar-actions { display: flex; align-items: center; gap: 10px; }
+    .topbar-left { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 220px; max-width: 580px; }
+    .topbar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    #cloud-sync-pill, #auth-cloud-pill { white-space: nowrap; }
 
     .role-pill {
       font-size: 0.73rem; font-weight: 800; padding: 5px 10px; border-radius: 999px; letter-spacing: 0.03em;
@@ -513,8 +514,9 @@
           <button type="submit" id="login-submit-btn" class="btn btn-primary btn-full">Sign In as Student</button>
         </form>
 
-        <div style="text-align:center;">
-          <span class="security-pill">🛡️ Protected by Salted SHA-256 Encryption</span>
+        <div style="text-align:center;display:flex;justify-content:center;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;">
+          <span class="security-pill" style="margin-top:0;">🛡️ Protected by Salted SHA-256 Encryption</span>
+          <span id="auth-cloud-pill" class="badge badge-amber">⏳ Connecting Cloud...</span>
         </div>
 
         <p id="student-register-footer" class="auth-footer-note">
@@ -681,8 +683,7 @@
   <!-- 👇 UPDATED FIREBASE MODULE SCRIPT 👇 -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/ajax/libs/firebasejs/13.3.0/firebase-app.js";
-    import { getAnalytics } from "https://www.gstatic.com/ajax/libs/firebasejs/13.3.0/firebase-analytics.js";
-    import { getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/ajax/libs/firebasejs/13.3.0/firebase-firestore.js";
+    import { initializeFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/ajax/libs/firebasejs/13.3.0/firebase-firestore.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyBD_Vd_tLU5OElxVP9r_h7VCGB6pCWpw2A",
@@ -695,15 +696,17 @@
     };
 
     const app = initializeApp(firebaseConfig);
-    let analytics = null;
-    if (location.protocol.startsWith("http")) {
-      try { analytics = getAnalytics(app); } catch (e) { console.warn("Analytics skipped:", e.message); }
-    }
-    const db = getFirestore(app);
+    const db = initializeFirestore(app, { experimentalForceLongPolling: true });
 
-    window.fb = { app, analytics, db, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot };
+    window.fb = { app, analytics: null, db, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot };
     window.dispatchEvent(new Event("fb-ready"));
     console.log("Firebase Free Spark Plan Connected!");
+
+    if (location.protocol.startsWith("http")) {
+      import("https://www.gstatic.com/ajax/libs/firebasejs/13.3.0/firebase-analytics.js")
+        .then(({ getAnalytics }) => { window.fb.analytics = getAnalytics(app); })
+        .catch(() => {});
+    }
   </script>
 
   <script>
@@ -955,6 +958,15 @@
             }
           } catch (e) {}
         }
+      },
+      async getAllFiles() {
+        const db = await this.open();
+        return new Promise((resolve) => {
+          const tx = db.transaction(this.storeName, "readonly");
+          const req = tx.objectStore(this.storeName).getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => resolve([]);
+        });
       },
       async getTotalSizeBytes() {
         const db = await this.open();
@@ -1335,7 +1347,7 @@
     let failedAuthMap = { student: { count: 0, lockUntil: 0 }, teacher: { count: 0, lockUntil: 0 } };
     let inactivityTimer = null;
 
-    const Reader = { item: null, itemType: "resource", pdfDoc: null, pageNum: 1, totalPages: 1, scale: 1.15, extractedPagesText: [], renderTask: null };
+    const Reader = { item: null, itemType: "resource", pdfDoc: null, pageNum: 1, totalPages: 1, scale: 1.15, extractedPagesText: [], renderTask: null, renderSeq: 0 };
 
     /* ==================== ACADEMIC LABELS & CASCADING SYNC HELPERS ==================== */
     function getDeptLabel(plural = false) {
@@ -1649,18 +1661,27 @@
     let _fbInitialSynced = false;
     let _fbSyncError = null;
 
-    function updateSyncStatusBadge(statusText, isOk) {
+    function updateSyncStatusBadge(statusText, isOk, isPending = false) {
+      const cls = `badge ${isOk ? "badge-green" : (isPending ? "badge-amber" : "badge-red")}`;
+      const applyTo = (node) => {
+        if (!node) return;
+        node.className = cls;
+        node.textContent = statusText;
+        node.title = _fbSyncError ? `Error: ${_fbSyncError} (Click karein)` : "Cloud Sync Status";
+        node.style.cursor = _fbSyncError ? "pointer" : "default";
+        node.onclick = _fbSyncError ? () => alert("Cloud Sync Error:\n\n" + _fbSyncError) : null;
+      };
+      applyTo(document.getElementById("auth-cloud-pill"));
       let el = document.getElementById("cloud-sync-pill");
       if (!el) {
         const actions = document.querySelector(".topbar-actions");
-        if (!actions) return;
-        el = document.createElement("span");
-        el.id = "cloud-sync-pill";
-        el.className = "badge";
-        actions.prepend(el);
+        if (actions) {
+          el = document.createElement("span");
+          el.id = "cloud-sync-pill";
+          actions.prepend(el);
+        }
       }
-      el.className = `badge ${isOk ? "badge-green" : "badge-red"}`;
-      el.textContent = statusText;
+      applyTo(el);
     }
 
     function saveState() {
@@ -1694,7 +1715,7 @@
           writes.push(p);
         });
       } else {
-        updateSyncStatusBadge(_fbSyncError ? "🔴 Cloud Blocked" : "⏳ Connecting...", false);
+        updateSyncStatusBadge(_fbSyncError ? "🔴 Cloud Blocked" : "⏳ Connecting...", false, !_fbSyncError);
       }
       return Promise.all(writes);
     }
@@ -1704,16 +1725,28 @@
     async function initFirebaseSync() {
       if (_fbSyncStarted) return;
       if (!window.fb || !window.fb.db) {
+        updateSyncStatusBadge("⏳ Connecting Cloud...", false, true);
         window.addEventListener("fb-ready", initFirebaseSync, { once: true });
+        setTimeout(() => {
+          if (!window.fb || !window.fb.db) {
+            _fbSyncError = "Firebase SDK load nahi hua (Localhost/HTTPS ya Internet check karein)";
+            updateSyncStatusBadge("🔴 Cloud Offline", false);
+          }
+        }, 6000);
         return;
       }
       _fbSyncStarted = true;
-      updateSyncStatusBadge("⏳ Connecting...", false);
+      updateSyncStatusBadge("⏳ Connecting Cloud...", false, true);
 
       const colRef = window.fb.collection(window.fb.db, "eduvault_state");
 
       try {
-        const snap = await window.fb.getDocs(colRef);
+        const snap = await Promise.race([
+          window.fb.getDocs(colRef),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Firestore server se 20s mein reply nahi aaya (Network/Firewall ya Database ID '(default)' check karein)")), 20000)
+          )
+        ]);
         if (snap.empty) {
           const legacySnap = await window.fb.getDoc(window.fb.doc(window.fb.db, "eduvault", "portalState"));
           if (legacySnap.exists()) applySectionData(legacySnap.data());
@@ -2188,7 +2221,8 @@
       if (typeof updateSyncStatusBadge === "function") {
         updateSyncStatusBadge(
           _fbInitialSynced ? "☁️ Cloud Synced" : (_fbSyncError ? "🔴 Cloud Blocked" : "⏳ Connecting..."),
-          _fbInitialSynced
+          _fbInitialSynced,
+          !_fbInitialSynced && !_fbSyncError
         );
       }
       document.getElementById("sidebar-user-name").textContent = currentUser.name;
@@ -3268,6 +3302,25 @@
       r.readAsText(f);
     }
 
+    function parseCsvOrPipeLine(line) {
+      if (line.includes("|")) return line.split("|").map((s) => s.trim());
+      const out = [];
+      let cur = "", inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+          if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
+          else inQuotes = !inQuotes;
+        } else if (ch === "," && !inQuotes) {
+          out.push(cur.trim()); cur = "";
+        } else {
+          cur += ch;
+        }
+      }
+      out.push(cur.trim());
+      return out;
+    }
+
     function importBulkQuestionsNow() {
       syncBuilderInputsFromDom();
       const raw = (document.getElementById("bulk-q-textarea")?.value || "").trim();
@@ -3276,7 +3329,7 @@
       const letterMap = { A: 0, B: 1, C: 2, D: 3, "1": 0, "2": 1, "3": 2, "4": 3 };
       let added = 0;
       lines.forEach((line) => {
-        const parts = line.includes("|") ? line.split("|") : line.split(",");
+        const parts = parseCsvOrPipeLine(line);
         if (parts.length < 6) return;
         const [qTxt, o0, o1, o2, o3, ansRaw, marksRaw, expRaw] = parts.map((s) => s.trim());
         if (!qTxt || qTxt.toLowerCase() === "question") return;
@@ -3559,19 +3612,28 @@
 
     async function renderPdfPage() {
       if (!Reader.pdfDoc) return;
+      const mySeq = ++Reader.renderSeq;
+      const targetPage = Reader.pageNum;
+      if (Reader.renderTask) {
+        try { Reader.renderTask.cancel(); } catch (e) {}
+        Reader.renderTask = null;
+      }
+      const page = await Reader.pdfDoc.getPage(targetPage);
+      if (mySeq !== Reader.renderSeq) return; // Agar user ne naya page click kar diya ho toh purana cancel karein
       if (Reader.renderTask) {
         try { Reader.renderTask.cancel(); } catch (e) {}
       }
-      const page = await Reader.pdfDoc.getPage(Reader.pageNum);
       const viewport = page.getViewport({ scale: Reader.scale });
       const canvas = document.getElementById("pdf-canvas");
       canvas.height = viewport.height; canvas.width = viewport.width;
-      Reader.renderTask = page.render({ canvasContext: canvas.getContext("2d"), viewport });
+      const task = page.render({ canvasContext: canvas.getContext("2d"), viewport });
+      Reader.renderTask = task;
       try {
-        await Reader.renderTask.promise;
+        await task.promise;
+        if (mySeq !== Reader.renderSeq) return;
         Reader.renderTask = null;
         const tc = await page.getTextContent();
-        Reader.extractedPagesText[Reader.pageNum - 1] = tc.items.map((i) => i.str).join(" ");
+        Reader.extractedPagesText[targetPage - 1] = tc.items.map((i) => i.str).join(" ");
         updateReaderToolbarInfo();
       } catch (err) {
         if (err?.name !== "RenderingCancelledException") console.error(err);
@@ -3785,7 +3847,11 @@
         e.preventDefault();
         const fd = new FormData(e.target), file = fd.get("briefFile");
         let attId = existing?.attachmentFileId || null, attName = existing?.attachmentName || null;
-        if (file && file.size > 0) { const saved = await FileDB.saveFile(file); attId = saved.id; attName = saved.name; }
+        if (file && file.size > 0) {
+          const saved = await FileDB.saveFile(file);
+          if (existing?.attachmentFileId) await FileDB.deleteFile(existing.attachmentFileId);
+          attId = saved.id; attName = saved.name;
+        }
         const payload = {
           id: existing ? existing.id : "asg_" + Date.now(), title: fd.get("title").trim(), subject: fd.get("subject").trim(),
           department: fd.get("department"), semester: fd.get("semester") || "Sem 4", deadline: fd.get("deadline"), maxMarks: Number(fd.get("maxMarks")) || 20,
@@ -3966,8 +4032,16 @@
         let reportFileId = existing?.reportFileId || null, reportName = existing?.reportName || null;
         let pptFileId = existing?.pptFileId || null, pptName = existing?.pptName || null;
         const rf = fd.get("reportFile"), pf = fd.get("pptFile");
-        if (rf && rf.size > 0) { const s = await FileDB.saveFile(rf); reportFileId = s.id; reportName = s.name; }
-        if (pf && pf.size > 0) { const s = await FileDB.saveFile(pf); pptFileId = s.id; pptName = s.name; }
+        if (rf && rf.size > 0) {
+          const s = await FileDB.saveFile(rf);
+          if (existing?.reportFileId) await FileDB.deleteFile(existing.reportFileId);
+          reportFileId = s.id; reportName = s.name;
+        }
+        if (pf && pf.size > 0) {
+          const s = await FileDB.saveFile(pf);
+          if (existing?.pptFileId) await FileDB.deleteFile(existing.pptFileId);
+          pptFileId = s.id; pptName = s.name;
+        }
         const payload = {
           id: existing ? existing.id : "prj_" + Date.now(), title: fd.get("title").trim(), author: fd.get("author").trim(),
           studentId: existing ? existing.studentId : currentUser.id,
@@ -4414,7 +4488,7 @@
           showToast(`"${title}" loaded into AI Study Assistant!`, "success");
           aiChatHistory.push({
             sender: "bot",
-            text: `📤 Material Loaded: "${title}" (${content.length} chars).\n\nAb aap neeche "🎯 Important Exam Questions", "📄 Detailed Summary", "✅ Interactive Practice Test" daba sakte hain ya kuch bhi pooch sakte hain!`,
+            text: `📤 Material Loaded: "${title}" (${content.length} chars).\n\nAb aap left side mein "🧠 Build Complete AI Study Model", "📄 Generate Detailed Summary", ya "✅ Generate 5 Practice MCQs" daba sakte hain ya neeche kuch bhi pooch sakte hain!`,
             searchQuery: `${title} ${subject}`
           });
           renderAiAssistantPage(document.getElementById("page-container"));
@@ -5251,7 +5325,7 @@
       const lines = document.getElementById("csv-paste-area").value.trim().split(/\r?\n/);
       let added = 0;
       lines.forEach((line) => {
-        const [name, rollNo, email, phone, pw, department, semester] = line.split(",").map((s) => (s || "").trim().replace(/^"|"$/g, ""));
+        const [name, rollNo, email, phone, pw, department, semester] = parseCsvOrPipeLine(line).map((s) => (s || "").replace(/^"|"$/g, ""));
         if (!name || !rollNo || name.toLowerCase() === "name") return;
         if (appState.users.some((u) => u.rollNo.toLowerCase() === rollNo.toLowerCase())) return;
         appState.users.push({
@@ -5554,12 +5628,19 @@
       else showToast(`Alert not sent: ${res.reason}`, "error");
     }
 
-    function exportPortalBackup() {
+    async function exportPortalBackup() {
       if (!isTeacherRole()) return;
-      const url = URL.createObjectURL(new Blob([JSON.stringify(appState, null, 2)], { type: "application/json" }));
+      showToast("Preparing full backup (including PDFs)...", "info");
+      const files = await FileDB.getAllFiles();
+      const encodedFiles = files.map((f) => ({
+        id: f.id, name: f.name, type: f.type, size: f.size,
+        base64: f.data ? arrayBufferToBase64(f.data) : ""
+      }));
+      const bundle = { ...appState, __filesBackup: encodedFiles };
+      const url = URL.createObjectURL(new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" }));
       const a = document.createElement("a"); a.href = url; a.download = `eduvault_backup_${new Date().toISOString().slice(0, 10)}.json`; a.click();
       URL.revokeObjectURL(url);
-      showToast("Full JSON backup downloaded!", "success");
+      showToast(`Full JSON backup downloaded (${encodedFiles.length} file(s) included)!`, "success");
     }
 
     function importPortalBackup(event) {
@@ -5570,6 +5651,18 @@
         try {
           const parsed = JSON.parse(reader.result);
           if (!parsed.users || !parsed.resources) throw new Error("Invalid backup format");
+          const filesBackup = Array.isArray(parsed.__filesBackup) ? parsed.__filesBackup : [];
+          delete parsed.__filesBackup;
+
+          for (const f of filesBackup) {
+            if (f.id && f.base64) {
+              await FileDB.putLocal({
+                id: f.id, name: f.name, type: f.type || "application/pdf",
+                size: f.size || 0, data: base64ToArrayBuffer(f.base64)
+              });
+            }
+          }
+
           const defaults = createSeedState();
           appState = {
             ...defaults,
@@ -5583,7 +5676,7 @@
           };
           showToast("Restoring backup to Cloud... Please wait.", "info");
           await Promise.race([saveState(), new Promise((r) => setTimeout(r, 4000))]);
-          showToast("Backup restored! Reloading portal...", "success");
+          showToast(`Backup restored (${filesBackup.length} file(s))! Reloading...`, "success");
           setTimeout(() => location.reload(), 500);
         } catch (err) {
           showToast("Invalid backup JSON file.", "error");

@@ -680,33 +680,41 @@
     </div>
   </div>
 
-  <!-- 👇 UPDATED FIREBASE MODULE SCRIPT 👇 -->
+  <!-- 👇 UPDATED FIREBASE MODULE SCRIPT (WITH ERROR CATCH) 👇 -->
   <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/ajax/libs/firebasejs/13.3.0/firebase-app.js";
-    import { initializeFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/ajax/libs/firebasejs/13.3.0/firebase-firestore.js";
+    (async () => {
+      try {
+        const { initializeApp } = await import("https://www.gstatic.com/firebasejs/13.3.0/firebase-app.js");
+        const { initializeFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot } = await import("https://www.gstatic.com/firebasejs/13.3.0/firebase-firestore.js");
 
-    const firebaseConfig = {
-      apiKey: "AIzaSyBD_Vd_tLU5OElxVP9r_h7VCGB6pCWpw2A",
-      authDomain: "library-kk-84dc7.firebaseapp.com",
-      projectId: "library-kk-84dc7",
-      storageBucket: "library-kk-84dc7.firebasestorage.app",
-      messagingSenderId: "635361903231",
-      appId: "1:635361903231:web:577d7bd28ec6238336354a",
-      measurementId: "G-N20L00KNKD"
-    };
+        const firebaseConfig = {
+          apiKey: "AIzaSyBD_Vd_tLU5OElxVP9r_h7VCGB6pCWpw2A",
+          authDomain: "library-kk-84dc7.firebaseapp.com",
+          projectId: "library-kk-84dc7",
+          storageBucket: "library-kk-84dc7.firebasestorage.app",
+          messagingSenderId: "635361903231",
+          appId: "1:635361903231:web:577d7bd28ec6238336354a",
+          measurementId: "G-N20L00KNKD"
+        };
 
-    const app = initializeApp(firebaseConfig);
-    const db = initializeFirestore(app, { experimentalForceLongPolling: true });
+        const app = initializeApp(firebaseConfig);
+        const db = initializeFirestore(app, { experimentalForceLongPolling: true });
 
-    window.fb = { app, analytics: null, db, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot };
-    window.dispatchEvent(new Event("fb-ready"));
-    console.log("Firebase Free Spark Plan Connected!");
+        window.fb = { app, analytics: null, db, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot };
+        window.dispatchEvent(new Event("fb-ready"));
+        console.log("Firebase Free Spark Plan Connected!");
 
-    if (location.protocol.startsWith("http")) {
-      import("https://www.gstatic.com/ajax/libs/firebasejs/13.3.0/firebase-analytics.js")
-        .then(({ getAnalytics }) => { window.fb.analytics = getAnalytics(app); })
-        .catch(() => {});
-    }
+        if (location.protocol.startsWith("http")) {
+          import("https://www.gstatic.com/firebasejs/13.3.0/firebase-analytics.js")
+            .then(({ getAnalytics }) => { window.fb.analytics = getAnalytics(app); })
+            .catch(() => {});
+        }
+      } catch (err) {
+        console.error("Firebase Module Load Error:", err);
+        window.__fbLoadError = `${err.name}: ${err.message} (Protocol: ${location.protocol})`;
+        window.dispatchEvent(new Event("fb-failed"));
+      }
+    })();
   </script>
 
   <script>
@@ -1724,15 +1732,24 @@
 
     async function initFirebaseSync() {
       if (_fbSyncStarted) return;
+      if (window.__fbLoadError) {
+        _fbSyncError = window.__fbLoadError;
+        updateSyncStatusBadge("🔴 Cloud Offline", false);
+        return;
+      }
       if (!window.fb || !window.fb.db) {
         updateSyncStatusBadge("⏳ Connecting Cloud...", false, true);
         window.addEventListener("fb-ready", initFirebaseSync, { once: true });
+        window.addEventListener("fb-failed", () => {
+          _fbSyncError = window.__fbLoadError || "Firebase SDK import failed";
+          updateSyncStatusBadge("🔴 Cloud Offline", false);
+        }, { once: true });
         setTimeout(() => {
           if (!window.fb || !window.fb.db) {
-            _fbSyncError = "Firebase SDK load nahi hua (Localhost/HTTPS ya Internet check karein)";
+            _fbSyncError = window.__fbLoadError || `Firebase SDK 15s mein load nahi hua (Protocol: ${location.protocol} — Live Server http://localhost use karein)`;
             updateSyncStatusBadge("🔴 Cloud Offline", false);
           }
-        }, 6000);
+        }, 15000);
         return;
       }
       _fbSyncStarted = true;

@@ -891,6 +891,7 @@
               );
             } catch (err) {
               console.warn("Firestore file upload failed:", err);
+              showToast("PDF Cloud Upload Failed: " + err.message, "error");
             }
           }
         }
@@ -1646,12 +1647,28 @@
     }
 
     let _fbInitialSynced = false;
+    let _fbSyncError = null;
+
+    function updateSyncStatusBadge(statusText, isOk) {
+      let el = document.getElementById("cloud-sync-pill");
+      if (!el) {
+        const actions = document.querySelector(".topbar-actions");
+        if (!actions) return;
+        el = document.createElement("span");
+        el.id = "cloud-sync-pill";
+        el.className = "badge";
+        actions.prepend(el);
+      }
+      el.className = `badge ${isOk ? "badge-green" : "badge-red"}`;
+      el.textContent = statusText;
+    }
 
     function saveState() {
       try {
         SafeStore.set(STORAGE_KEY, JSON.stringify(appState));
       } catch (err) {
         console.error("Storage save failed:", err);
+        showToast("Device Storage Full: Kuch purana data/photo hatayein.", "error");
       }
 
       const writes = [];
@@ -1663,10 +1680,21 @@
           _lastSectionJson[secId] = json;
           _ignoreSections[secId] = true;
           const p = window.fb.setDoc(window.fb.doc(window.fb.db, "eduvault_state", secId), cleanSec)
-            .catch((e) => console.error(`Firebase Save Error (${secId}):`, e))
+            .then(() => {
+              _fbSyncError = null;
+              updateSyncStatusBadge("☁️ Cloud Synced", true);
+            })
+            .catch((e) => {
+              console.error(`Firebase Save Error (${secId}):`, e);
+              _fbSyncError = e.message;
+              updateSyncStatusBadge("🔴 Sync Failed", false);
+              showToast(`Cloud Save Error (${secId}): ${e.message}`, "error");
+            })
             .finally(() => { setTimeout(() => { _ignoreSections[secId] = false; }, 350); });
           writes.push(p);
         });
+      } else {
+        updateSyncStatusBadge(_fbSyncError ? "🔴 Cloud Blocked" : "⏳ Connecting...", false);
       }
       return Promise.all(writes);
     }
@@ -1680,6 +1708,7 @@
         return;
       }
       _fbSyncStarted = true;
+      updateSyncStatusBadge("⏳ Connecting...", false);
 
       const colRef = window.fb.collection(window.fb.db, "eduvault_state");
 
@@ -1716,12 +1745,19 @@
           }
         }
         _fbInitialSynced = true;
+        _fbSyncError = null;
+        updateSyncStatusBadge("☁️ Cloud Synced", true);
       } catch (e) {
-        console.warn("Firebase initial check failed:", e);
+        console.error("Firebase initial check failed:", e);
+        _fbSyncError = e.message;
+        updateSyncStatusBadge("🔴 Cloud Blocked", false);
+        showToast("Firebase Sync Error: " + e.message + " (Firestore Rules check karein)", "error");
+        return;
       }
 
       window.fb.onSnapshot(colRef, (querySnap) => {
         if (querySnap.metadata.hasPendingWrites) return;
+        updateSyncStatusBadge("☁️ Cloud Synced", true);
         let anyChanged = false;
         const changedSecs = new Set();
         querySnap.docChanges().forEach((change) => {
@@ -1753,6 +1789,9 @@
         }
       }, (err) => {
         console.error("Firestore Snapshot Error:", err);
+        _fbSyncError = err.message;
+        updateSyncStatusBadge("🔴 Sync Blocked", false);
+        showToast("Live Sync Error: " + err.message, "error");
       });
     }
 
@@ -2146,6 +2185,12 @@
 
     function syncUserUI() {
       if (!currentUser) return;
+      if (typeof updateSyncStatusBadge === "function") {
+        updateSyncStatusBadge(
+          _fbInitialSynced ? "☁️ Cloud Synced" : (_fbSyncError ? "🔴 Cloud Blocked" : "⏳ Connecting..."),
+          _fbInitialSynced
+        );
+      }
       document.getElementById("sidebar-user-name").textContent = currentUser.name;
       document.getElementById("sidebar-user-meta").textContent =
         currentUser.role === "student" ? `${currentUser.rollNo} • ${currentUser.semester}` : `TEACHER (${currentUser.rollNo}) • ${currentUser.department.split(" ")[0]}`;
@@ -2185,6 +2230,9 @@
       bindDeptBatchAutofetch("reg-dept-select", "reg-sem-select");
       document.getElementById("register-student-form").addEventListener("submit", async (e) => {
         e.preventDefault();
+        if (window.fb && !_fbInitialSynced && !_fbSyncError) {
+          return showToast("Cloud se connect ho raha hai, 2 second baad dobara click karein.", "error");
+        }
         const fd = new FormData(e.target);
         const name = fd.get("name").trim();
         const rollNo = fd.get("rollNo").trim();

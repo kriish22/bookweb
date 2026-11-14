@@ -678,6 +678,34 @@
     </div>
   </div>
 
+  <!-- 👇 UPDATED FIREBASE MODULE SCRIPT 👇 -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/ajax/libs/firebasejs/13.3.0/firebase-app.js";
+    import { getAnalytics } from "https://www.gstatic.com/ajax/libs/firebasejs/13.3.0/firebase-analytics.js";
+    import { getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/ajax/libs/firebasejs/13.3.0/firebase-firestore.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBD_Vd_tLU5OElxVP9r_h7VCGB6pCWpw2A",
+      authDomain: "library-kk-84dc7.firebaseapp.com",
+      projectId: "library-kk-84dc7",
+      storageBucket: "library-kk-84dc7.firebasestorage.app",
+      messagingSenderId: "635361903231",
+      appId: "1:635361903231:web:577d7bd28ec6238336354a",
+      measurementId: "G-N20L00KNKD"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    let analytics = null;
+    if (location.protocol.startsWith("http")) {
+      try { analytics = getAnalytics(app); } catch (e) { console.warn("Analytics skipped:", e.message); }
+    }
+    const db = getFirestore(app);
+
+    window.fb = { app, analytics, db, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot };
+    window.dispatchEvent(new Event("fb-ready"));
+    console.log("Firebase Free Spark Plan Connected!");
+  </script>
+
   <script>
     if (window.pdfjsLib) {
       pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -793,7 +821,25 @@
       return legacySeedDigest(plainInput) === storedHash;
     }
 
-    /* ==================== INDEXEDDB FILE STORAGE ==================== */
+    /* ==================== INDEXEDDB + FIREBASE STORAGE ==================== */
+    function arrayBufferToBase64(buffer) {
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      const step = 0x8000;
+      for (let i = 0; i < bytes.length; i += step) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+      }
+      return btoa(binary);
+    }
+
+    function base64ToArrayBuffer(base64) {
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes.buffer;
+    }
+
+    /* ==================== INDEXEDDB + FREE FIRESTORE FILE STORAGE ==================== */
     const FileDB = {
       dbName: "EduVaultFilesDB",
       storeName: "files",
@@ -807,35 +853,107 @@
           req.onerror = () => reject(req.error);
         });
       },
-      async saveFile(file) {
+      async putLocal(record) {
         const db = await this.open();
-        const id = "file_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
-        const buffer = await file.arrayBuffer();
         return new Promise((resolve, reject) => {
           const tx = db.transaction(this.storeName, "readwrite");
-          tx.objectStore(this.storeName).put({ id, name: file.name, type: file.type || "application/pdf", size: file.size, data: buffer });
-          tx.oncomplete = () => resolve({ id, name: file.name, size: file.size, type: file.type });
+          tx.objectStore(this.storeName).put(record);
+          tx.oncomplete = () => resolve(record);
           tx.onerror = () => reject(tx.error);
         });
+      },
+      async saveFile(file) {
+        const id = "file_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
+        const type = file.type || "application/pdf";
+        const buffer = await file.arrayBuffer();
+        const record = { id, name: file.name, type, size: file.size || buffer.byteLength, data: buffer };
+        await this.putLocal(record);
+
+        // Free Firestore me chunks bana kar save karein (max ~10 MB per file)
+        if (window.fb && window.fb.db) {
+          if (record.size > 10 * 1024 * 1024) {
+            showToast("File 10MB se badi hai — sirf is device par save hui hai.", "error");
+          } else {
+            try {
+              const CHUNK_BYTES = 450000; // ~600 KB base64 (Firestore 1 MB limit ke andar)
+              const totalBytes = new Uint8Array(buffer);
+              const chunkCount = Math.max(1, Math.ceil(totalBytes.length / CHUNK_BYTES));
+              for (let i = 0; i < chunkCount; i++) {
+                const slice = totalBytes.subarray(i * CHUNK_BYTES, (i + 1) * CHUNK_BYTES);
+                await window.fb.setDoc(
+                  window.fb.doc(window.fb.db, "eduvault_file_chunks", `${id}_${i}`),
+                  { data: arrayBufferToBase64(slice.buffer.slice(slice.byteOffset, slice.byteOffset + slice.byteLength)) }
+                );
+              }
+              await window.fb.setDoc(
+                window.fb.doc(window.fb.db, "eduvault_files", id),
+                { name: file.name, type, size: record.size, chunkCount }
+              );
+            } catch (err) {
+              console.warn("Firestore file upload failed:", err);
+            }
+          }
+        }
+        return { id, name: file.name, size: record.size, type };
       },
       async getFile(id) {
         if (!id) return null;
         const db = await this.open();
-        return new Promise((resolve, reject) => {
+        const localRec = await new Promise((resolve, reject) => {
           const tx = db.transaction(this.storeName, "readonly");
           const req = tx.objectStore(this.storeName).get(id);
           req.onsuccess = () => resolve(req.result || null);
           req.onerror = () => reject(req.error);
         });
+        if (localRec && localRec.data) return localRec;
+
+        // Doosre device par hone par Firestore se download karein
+        if (window.fb && window.fb.db) {
+          try {
+            const metaSnap = await window.fb.getDoc(window.fb.doc(window.fb.db, "eduvault_files", id));
+            if (!metaSnap.exists()) return null;
+            const meta = metaSnap.data();
+            const parts = [];
+            let totalLen = 0;
+            for (let i = 0; i < meta.chunkCount; i++) {
+              const cSnap = await window.fb.getDoc(window.fb.doc(window.fb.db, "eduvault_file_chunks", `${id}_${i}`));
+              if (!cSnap.exists()) return null;
+              const arr = new Uint8Array(base64ToArrayBuffer(cSnap.data().data));
+              parts.push(arr);
+              totalLen += arr.length;
+            }
+            const merged = new Uint8Array(totalLen);
+            let offset = 0;
+            parts.forEach((p) => { merged.set(p, offset); offset += p.length; });
+            const rec = { id, name: meta.name, type: meta.type, size: meta.size, data: merged.buffer };
+            await this.putLocal(rec);
+            return rec;
+          } catch (err) {
+            console.warn("Firestore file download failed:", err);
+          }
+        }
+        return null;
       },
       async deleteFile(id) {
         if (!id) return;
         const db = await this.open();
-        return new Promise((resolve) => {
+        await new Promise((resolve) => {
           const tx = db.transaction(this.storeName, "readwrite");
           tx.objectStore(this.storeName).delete(id);
           tx.oncomplete = () => resolve();
         });
+        if (window.fb && window.fb.db) {
+          try {
+            const metaSnap = await window.fb.getDoc(window.fb.doc(window.fb.db, "eduvault_files", id));
+            if (metaSnap.exists()) {
+              const count = metaSnap.data().chunkCount || 0;
+              for (let i = 0; i < count; i++) {
+                await window.fb.deleteDoc(window.fb.doc(window.fb.db, "eduvault_file_chunks", `${id}_${i}`));
+              }
+              await window.fb.deleteDoc(window.fb.doc(window.fb.db, "eduvault_files", id));
+            }
+          } catch (e) {}
+        }
       },
       async getTotalSizeBytes() {
         const db = await this.open();
@@ -1315,7 +1433,7 @@
           this.sessionSeconds++;
           this.unsavedSeconds++;
           this.updateTimerBadge();
-          if (this.unsavedSeconds >= 5) this.flush();
+          if (this.unsavedSeconds >= 45) this.flush();
         }, 1000);
       },
       updateTimerBadge() {
@@ -1480,13 +1598,162 @@
     const pdfTextCache = {};
     let aiCustomContext = null;
 
+    const STATE_SECTIONS = {
+      core: ["branding", "academicConfig", "settings", "departments", "semesters"],
+      users: ["users"],
+      library: ["resources", "pyqs", "projects"],
+      tests: ["mockTests", "testAttempts"],
+      assignments: ["assignments", "submissions"],
+      activity: [
+        "studyLogs", "dailyStudy", "studyGoals", "announcements", "notifications",
+        "itemBookmarks", "bookmarks", "favorites", "readingHistory", "notes",
+        "reports", "auditLogs", "externalAiDocs"
+      ]
+    };
+    const _lastSectionJson = {};
+    const _ignoreSections = {};
+
+    function pickSectionObj(keys) {
+      const out = {};
+      keys.forEach((k) => { if (appState[k] !== undefined) out[k] = appState[k]; });
+      return out;
+    }
+
+    function applySectionData(data) {
+      const defaults = createSeedState();
+      Object.keys(data).forEach((k) => {
+        if (k === "academicConfig") {
+          appState.academicConfig = {
+            ...defaults.academicConfig,
+            ...(data.academicConfig || {}),
+            deptToBatchMap: { ...defaults.academicConfig.deptToBatchMap, ...(data.academicConfig?.deptToBatchMap || {}) }
+          };
+        } else if (k === "settings") {
+          appState.settings = { ...defaults.settings, ...(data.settings || {}) };
+        } else {
+          appState[k] = data[k];
+        }
+      });
+    }
+
+    function isUserBusyInUi() {
+      if (TestRunner.active) return true;
+      const crudOpen = !document.getElementById("crud-modal").classList.contains("hidden");
+      const readerOpen = !document.getElementById("pdf-reader-modal").classList.contains("hidden");
+      if (crudOpen || readerOpen) return true;
+      const tag = document.activeElement?.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+    }
+
+    let _fbInitialSynced = false;
+
     function saveState() {
       try {
         SafeStore.set(STORAGE_KEY, JSON.stringify(appState));
       } catch (err) {
         console.error("Storage save failed:", err);
-        showToast("Browser storage limit reached or restricted! Using temporary memory.", "error");
       }
+
+      const writes = [];
+      if (window.fb && window.fb.db && _fbInitialSynced) {
+        Object.entries(STATE_SECTIONS).forEach(([secId, keys]) => {
+          const cleanSec = JSON.parse(JSON.stringify(pickSectionObj(keys)));
+          const json = JSON.stringify(cleanSec);
+          if (json === _lastSectionJson[secId]) return;
+          _lastSectionJson[secId] = json;
+          _ignoreSections[secId] = true;
+          const p = window.fb.setDoc(window.fb.doc(window.fb.db, "eduvault_state", secId), cleanSec)
+            .catch((e) => console.error(`Firebase Save Error (${secId}):`, e))
+            .finally(() => { setTimeout(() => { _ignoreSections[secId] = false; }, 350); });
+          writes.push(p);
+        });
+      }
+      return Promise.all(writes);
+    }
+
+    let _fbSyncStarted = false;
+
+    async function initFirebaseSync() {
+      if (_fbSyncStarted) return;
+      if (!window.fb || !window.fb.db) {
+        window.addEventListener("fb-ready", initFirebaseSync, { once: true });
+        return;
+      }
+      _fbSyncStarted = true;
+
+      const colRef = window.fb.collection(window.fb.db, "eduvault_state");
+
+      try {
+        const snap = await window.fb.getDocs(colRef);
+        if (snap.empty) {
+          const legacySnap = await window.fb.getDoc(window.fb.doc(window.fb.db, "eduvault", "portalState"));
+          if (legacySnap.exists()) applySectionData(legacySnap.data());
+          for (const [secId, keys] of Object.entries(STATE_SECTIONS)) {
+            const cleanSec = JSON.parse(JSON.stringify(pickSectionObj(keys)));
+            _lastSectionJson[secId] = JSON.stringify(cleanSec);
+            await window.fb.setDoc(window.fb.doc(window.fb.db, "eduvault_state", secId), cleanSec);
+          }
+        } else {
+          snap.forEach((docSnap) => {
+            const secId = docSnap.id;
+            if (!STATE_SECTIONS[secId]) return;
+            applySectionData(docSnap.data());
+            _lastSectionJson[secId] = JSON.stringify(pickSectionObj(STATE_SECTIONS[secId]));
+          });
+          try { SafeStore.set(STORAGE_KEY, JSON.stringify(appState)); } catch (e) {}
+          applyBranding();
+          if (currentUser) {
+            const updatedMe = appState.users.find((u) => u.id === currentUser.id);
+            if (!updatedMe || !updatedMe.active) {
+              showToast("Your account was suspended or removed.", "error");
+              logout();
+            } else {
+              currentUser = updatedMe;
+              syncUserUI();
+              updateNotifBadge();
+              if (!isUserBusyInUi()) navigateTo(currentPage);
+            }
+          }
+        }
+        _fbInitialSynced = true;
+      } catch (e) {
+        console.warn("Firebase initial check failed:", e);
+      }
+
+      window.fb.onSnapshot(colRef, (querySnap) => {
+        if (querySnap.metadata.hasPendingWrites) return;
+        let anyChanged = false;
+        const changedSecs = new Set();
+        querySnap.docChanges().forEach((change) => {
+          const secId = change.doc.id;
+          if (!STATE_SECTIONS[secId] || _ignoreSections[secId]) return;
+          if (change.type === "added" || change.type === "modified") {
+            applySectionData(change.doc.data());
+            _lastSectionJson[secId] = JSON.stringify(pickSectionObj(STATE_SECTIONS[secId]));
+            changedSecs.add(secId);
+            anyChanged = true;
+          }
+        });
+        if (!anyChanged) return;
+        try { SafeStore.set(STORAGE_KEY, JSON.stringify(appState)); } catch (e) {}
+        applyBranding();
+
+        if (currentUser) {
+          const updatedMe = appState.users.find((u) => u.id === currentUser.id);
+          if (!updatedMe || !updatedMe.active) {
+            showToast("Your account was suspended or removed by Teacher.", "error");
+            logout();
+            return;
+          }
+          currentUser = updatedMe;
+          syncUserUI();
+          updateNotifBadge();
+          const skipAiOnlyActivity = currentPage === "ai" && changedSecs.size === 1 && changedSecs.has("activity");
+          if (!isUserBusyInUi() && !skipAiOnlyActivity) navigateTo(currentPage);
+        }
+      }, (err) => {
+        console.error("Firestore Snapshot Error:", err);
+      });
     }
 
     function cleanupBookmarksFor(itemType, itemId) {
@@ -1637,12 +1904,13 @@
         pdfjsLib.GlobalWorkerOptions.workerSrc =
           "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
       }
-      applyTheme(appState.settings.theme || "light");
+      applyTheme(appState.settings.theme || "light", true);
       applyBranding();
       bindAuthEvents();
       bindShellEvents();
       bindSecurityListeners();
       restoreSession();
+      initFirebaseSync();
     }
 
     
@@ -1698,12 +1966,12 @@
       if (subEl) subEl.textContent = subtitle;
     }
 
-    function applyTheme(theme) {
+    function applyTheme(theme, skipSave = false) {
       document.documentElement.setAttribute("data-theme", theme);
       appState.settings.theme = theme;
       const btn = document.getElementById("theme-toggle-btn");
       if (btn) btn.textContent = theme === "dark" ? "☀️" : "🌙";
-      saveState();
+      if (!skipSave) saveState();
     }
 
     function applyLanguage() {
@@ -1868,6 +2136,9 @@
       pyqFilter = { search: "", year: "All", examType: "All", department: "All" };
       projFilter = { dept: "All", sem: "All" };
       recentSearches = [];
+      document.getElementById("pdf-reader-modal").classList.add("hidden");
+      document.getElementById("crud-modal").classList.add("hidden");
+      if (document.fullscreenElement) document.exitFullscreen?.();
       document.getElementById("app-shell").classList.add("hidden");
       document.getElementById("auth-view").classList.remove("hidden");
       showToast("Signed out safely.");
@@ -3213,6 +3484,9 @@
       document.getElementById("pdf-reader-modal").classList.remove("hidden");
 
       const canvas = document.getElementById("pdf-canvas"), virtualPage = document.getElementById("virtual-doc-page");
+      canvas.classList.add("hidden");
+      virtualPage.classList.remove("hidden");
+      virtualPage.innerHTML = `<div style="text-align:center;padding:80px 20px;color:#64748b;">⏳ Loading document...</div>`;
       if (item.fileId && window.pdfjsLib) {
         const fileRec = await FileDB.getFile(item.fileId);
         if (fileRec && fileRec.data) {
@@ -4613,17 +4887,39 @@
 
       if (!isTeacherRole()) bindDeptBatchAutofetch("prof-dept-sel", "prof-sem-sel");
 
-      document.getElementById("profile-photo-input").addEventListener("change", (e) => {
+      function compressProfilePhoto(file, maxDim = 200, quality = 0.72) {
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          const objUrl = URL.createObjectURL(file);
+          img.onload = () => {
+            URL.revokeObjectURL(objUrl);
+            const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+            const canvas = document.createElement("canvas");
+            canvas.width = Math.max(1, Math.round(img.width * scale));
+            canvas.height = Math.max(1, Math.round(img.height * scale));
+            canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+            resolve(canvas.toDataURL("image/jpeg", quality));
+          };
+          img.onerror = () => { URL.revokeObjectURL(objUrl); reject(new Error("Invalid image")); };
+          img.src = objUrl;
+        });
+      }
+
+      document.getElementById("profile-photo-input").addEventListener("change", async (e) => {
         const file = e.target.files[0];
         if (!file) return;
-        if (file.size > 2 * 1024 * 1024) return showToast("Image must be under 2 MB.", "error");
-        const reader = new FileReader();
-        reader.onload = () => {
-          currentUser.photo = reader.result;
+        if (!file.type.startsWith("image/")) return showToast("Please select a valid image file.", "error");
+        try {
+          const compressedDataUrl = await compressProfilePhoto(file, 200, 0.72);
+          if (compressedDataUrl.length > 150000) {
+            return showToast("Image is still too large after compression. Choose another photo.", "error");
+          }
+          currentUser.photo = compressedDataUrl;
           saveState(); syncUserUI(); renderProfilePage(el);
-          showToast("Profile photo updated!", "success");
-        };
-        reader.readAsDataURL(file);
+          showToast("Profile photo compressed & updated!", "success");
+        } catch (err) {
+          showToast("Could not process image.", "error");
+        }
       });
 
       document.getElementById("profile-form").addEventListener("submit", (e) => {
@@ -5222,7 +5518,7 @@
       if (!isTeacherRole()) return;
       const file = event.target.files[0]; if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.onload = async () => {
         try {
           const parsed = JSON.parse(reader.result);
           if (!parsed.users || !parsed.resources) throw new Error("Invalid backup format");
@@ -5237,9 +5533,10 @@
             },
             settings: { ...defaults.settings, ...(parsed.settings || {}) }
           };
-          saveState();
+          showToast("Restoring backup to Cloud... Please wait.", "info");
+          await Promise.race([saveState(), new Promise((r) => setTimeout(r, 4000))]);
           showToast("Backup restored! Reloading portal...", "success");
-          setTimeout(() => location.reload(), 900);
+          setTimeout(() => location.reload(), 500);
         } catch (err) {
           showToast("Invalid backup JSON file.", "error");
         }
